@@ -951,6 +951,15 @@ const AppState = {
       if (!u.accessCode) {
         u.accessCode = `ANU-${101 + idx}`;
       }
+      if (!u.password || String(u.password).trim() === '' || String(u.password).trim() === '123456') {
+        const base = (u.username || u.name || `cliente${idx + 1}`)
+          .toLowerCase()
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '')
+          .replace(/[^a-z0-9]/g, '')
+          .slice(0, 10);
+        u.password = `${base}123`;
+      }
     });
   },
 
@@ -1014,8 +1023,11 @@ const AppState = {
           window.history.replaceState(null, '', window.location.pathname);
           setTimeout(() => {
             const pInp = document.getElementById('login-password');
-            if (pInp) pInp.value = userObj.password || userObj.accessCode || '';
-            showToast(`Cuenta de ${userObj.name} sincronizada. Pulsa Ingresar.`);
+            if (pInp) {
+              pInp.value = '';
+              pInp.focus();
+            }
+            showToast(`Cuenta sincronizada. Ingresa tu contraseña para acceder.`);
           }, 250);
         }
       } catch (e) {
@@ -1389,10 +1401,9 @@ function refreshLogos() {
 }
 
 // ============================================================================
-// 10. VISTA DE INICIO DE SESIÓN (ACCESO ÚNICAMENTE CON CONTRASEÑA)
+// 10. VISTA DE INICIO DE SESIÓN (ACCESO EXCLUSIVO CON CONTRASEÑA)
 // ============================================================================
 function renderAuthView() {
-  const activeClients = (AppState.db.users || []).filter(u => u.active);
   return `
     <div class="auth-wrapper">
       <div class="auth-card">
@@ -1407,37 +1418,23 @@ function renderAuthView() {
         <form id="login-form">
           <div class="form-group">
             <label class="form-label">
-              <span>CONTRASEÑA DE ACCESO</span>
+              <span>🔒 CONTRASEÑA DE ACCESO</span>
               <button type="button" id="toggle-pass-vis" class="pill-btn" style="padding:0.15rem 0.5rem;font-size:0.68rem;">
                 👁 Mostrar
               </button>
             </label>
-            <input type="password" id="login-password" class="form-input mono" style="font-size:1.08rem;text-align:center;letter-spacing:0.08em;" placeholder="Ingresa tu contraseña personal" required autocomplete="current-password" />
+            <input type="password" id="login-password" class="form-input mono" style="font-size:1.08rem;text-align:center;letter-spacing:0.08em;" placeholder="Ingresa tu contraseña" required autocomplete="off" />
             <div style="font-size:0.74rem;color:var(--text-secondary);text-align:center;margin-top:0.45rem;">
-              Ingresa únicamente la contraseña que te asignó Diego Rodea.
+              Acceso privado exclusivo con contraseña asignada por Diego Rodea.
             </div>
           </div>
 
           <div id="login-error" style="display:none;margin-bottom:1rem;padding:0.7rem;border:1px solid var(--border-strong);background:var(--bg-secondary);font-size:0.82rem;font-weight:600;"></div>
 
           <button type="submit" id="login-submit-btn" class="btn btn-block" style="padding:0.85rem;">
-            INGRESAR A ANUARUS
+            INGRESAR CON CONTRASEÑA
           </button>
         </form>
-
-        <div class="quick-access-pills">
-          <div class="eyebrow">ACCESO RÁPIDO DEMOSTRACIÓN (1 CLIC):</div>
-          <div class="pill-list">
-            <button type="button" class="pill-btn" data-quick-pass="123456">
-              ★ Admin Diego (123456)
-            </button>
-            ${activeClients.map(u => `
-              <button type="button" class="pill-btn" data-quick-pass="${escapeHtml(u.password)}">
-                ${escapeHtml(u.name.split(' ')[0])} (${escapeHtml(u.password)})
-              </button>
-            `).join('')}
-          </div>
-        </div>
 
         <div style="margin-top:1.25rem;display:flex;justify-content:space-between;align-items:center;font-size:0.75rem;color:var(--text-secondary);gap:0.5rem;flex-wrap:wrap;">
           <button type="button" id="auth-theme-toggle" class="pill-btn">
@@ -1457,9 +1454,7 @@ function findMatchingClient(rawInput) {
   if (!norm) return null;
   return (AppState.db.users || []).find(u => {
     const uPass = String(u.password || '').trim().toLowerCase();
-    const uCode = String(u.accessCode || '').trim().toLowerCase();
-    const uName = String(u.username || '').trim().toLowerCase();
-    return uPass === norm || uCode === norm || uName === norm;
+    return uPass !== '' && uPass === norm;
   });
 }
 
@@ -1484,30 +1479,35 @@ function bindAuthEvents() {
       const rawPass = (passInp ? passInp.value : '').trim();
       const normPass = rawPass.toLowerCase();
 
-      // Check Admin Account: contraseña 123456 (o diego rodea)
-      if (normPass === '123456' || normPass === 'diego rodea' || normPass === 'diegorodea') {
+      if (!normPass) {
+        errBox.style.display = 'block';
+        errBox.textContent = 'Debes escribir tu contraseña para poder ingresar.';
+        return;
+      }
+
+      // Check Admin Account strictly by password (123456)
+      if (normPass === ADMIN_CREDENTIALS.password.toLowerCase()) {
         AppState.currentUser = { role: 'admin', name: 'Diego Rodea' };
         AppState.impersonatingUserId = null;
         AppState.activeTab = 'admin_users';
-        // Push local users & pull remote users so Admin and Cloud are 100% in sync
         AppState.persist(true);
         AppState.render();
         showToast('Bienvenido, Entrenador y Nutriólogo Diego Rodea.');
         return;
       }
 
-      // Check Client Accounts by Password locally first, then pull from Cloud if not found!
+      // Check Client Accounts strictly by Password locally first, then pull from Cloud if not found
       let found = findMatchingClient(rawPass);
       if (!found) {
-        if (submitBtn) submitBtn.textContent = 'BUSCANDO TU CONTRASEÑA EN LA NUBE...';
+        if (submitBtn) submitBtn.textContent = 'VERIFICANDO CONTRASEÑA EN LA NUBE...';
         await AppState.syncFromCloud(false);
-        if (submitBtn) submitBtn.textContent = 'INGRESAR A ANUARUS';
+        if (submitBtn) submitBtn.textContent = 'INGRESAR CON CONTRASEÑA';
         found = findMatchingClient(rawPass);
       }
 
       if (!found) {
         errBox.style.display = 'block';
-        errBox.textContent = 'Contraseña no encontrada. Verifica que esté bien escrita o pide a Diego Rodea tu enlace de acceso.';
+        errBox.textContent = 'Contraseña incorrecta. Solicita tu contraseña personal a Diego Rodea.';
         return;
       }
 
@@ -1524,13 +1524,6 @@ function bindAuthEvents() {
       showToast(`Bienvenido a Anuarus, ${found.name}.`);
     });
   }
-
-  document.querySelectorAll('[data-quick-pass]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      if (passInp) passInp.value = btn.getAttribute('data-quick-pass');
-      form.dispatchEvent(new Event('submit'));
-    });
-  });
 
   const themeBtn = document.getElementById('auth-theme-toggle');
   if (themeBtn) {
