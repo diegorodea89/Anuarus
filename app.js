@@ -96,7 +96,7 @@ function getInitialSeedData() {
         id: 'usr_carlos',
         username: 'carlos',
         accessCode: 'ANU-101',
-        password: '123',
+        password: 'carlos123',
         name: 'Carlos Mendoza',
         sex: 'M',
         age: 28,
@@ -183,7 +183,7 @@ function getInitialSeedData() {
         id: 'usr_valeria',
         username: 'valeria',
         accessCode: 'ANU-102',
-        password: '123',
+        password: 'valeria123',
         name: 'Valeria Gómez',
         sex: 'F',
         age: 26,
@@ -602,7 +602,7 @@ const StrengthEngine = {
 // ============================================================================
 // 5. MOTOR DE NUBE Y PERSISTENCIA (LOCAL + REST CLOUD SYNC PARA GITHUB PAGES)
 // ============================================================================
-const ANUARUS_CLOUD_TOPIC = 'anuarus_diego_rodea_cloud_sync_v2';
+const ANUARUS_CLOUD_TOPIC = 'anuarus_diego_rodea_auth_v4';
 
 const CloudSync = {
   getConfig() {
@@ -618,6 +618,112 @@ const CloudSync = {
   },
   saveConfig(cfg) {
     localStorage.setItem(CLOUD_CONFIG_KEY, JSON.stringify(cfg));
+  },
+
+  // Compact user serializer (< 250 bytes per user so it never exceeds ntfy 4KB inline limit)
+  packUser(u) {
+    const m = u.measurements || {};
+    const recentSessions = (u.sessions || []).slice(-6).map(s => ({
+      i: s.id,
+      d: s.date,
+      u: s.unit || 'kg',
+      n: (s.notes || '').slice(0, 60),
+      e: (s.exercises || []).map(ex => ({
+        x: ex.exerciseId,
+        s: (ex.sets || []).map(st => [st.weightKg, st.reps])
+      }))
+    }));
+    const recentVideos = (u.videos || []).slice(0, 5).map(v => ({
+      i: v.id,
+      d: v.date,
+      x: v.exerciseId,
+      w: v.weightKg,
+      r: v.reps,
+      un: (v.userNotes || '').slice(0, 80),
+      eu: v.externalUrl || '',
+      st: v.status || 'pending',
+      rt: v.rating || '',
+      cc: (v.coachComment || '').slice(0, 140)
+    }));
+    return {
+      i: u.id,
+      n: u.name,
+      u: u.username,
+      c: u.accessCode || '',
+      p: String(u.password || ''),
+      s: u.sex || 'M',
+      w: u.weightKg || 75,
+      h: u.heightCm || 175,
+      pu: u.preferredUnit || 'kg',
+      a: u.active ? 1 : 0,
+      pd: u.paymentDate || '',
+      ut: u.updatedAt || new Date().toISOString(),
+      g: (u.goal || '').slice(0, 90),
+      fb: (u.coachFeedback || '').slice(0, 180),
+      fbd: u.coachFeedbackDate || '',
+      m: [m.waist || 80, m.neck || 38, m.hip || 96, m.arm || 35, m.calf || 36, m.thigh || 55, m.updatedAt || ''],
+      ses: recentSessions,
+      vid: recentVideos
+    };
+  },
+
+  unpackUser(pk) {
+    if (!pk || !pk.i) return null;
+    const mArr = Array.isArray(pk.m) ? pk.m : [80, 38, 96, 35, 36, 55, ''];
+    const meas = {
+      waist: mArr[0],
+      neck: mArr[1],
+      hip: mArr[2],
+      arm: mArr[3],
+      calf: mArr[4],
+      thigh: mArr[5],
+      updatedAt: mArr[6] || ''
+    };
+    const sessions = (pk.ses || []).map(s => ({
+      id: s.i,
+      date: s.d,
+      unit: s.u || 'kg',
+      notes: s.n || '',
+      exercises: (s.e || []).map(ex => ({
+        exerciseId: ex.x,
+        sets: (ex.s || []).map(pair => ({ weightKg: pair[0], reps: pair[1] }))
+      }))
+    }));
+    const videos = (pk.vid || []).map(v => ({
+      id: v.i,
+      date: v.d,
+      exerciseId: v.x,
+      weightKg: v.w,
+      reps: v.r,
+      userNotes: v.un || '',
+      externalUrl: v.eu || '',
+      hasLocalBlob: false,
+      status: v.st || 'pending',
+      rating: v.rt || '',
+      coachComment: v.cc || ''
+    }));
+    return {
+      id: pk.i,
+      name: pk.n || 'Cliente',
+      username: pk.u || 'cliente',
+      accessCode: pk.c || 'ANU-101',
+      password: String(pk.p || ''),
+      sex: pk.s || 'M',
+      age: 27,
+      weightKg: Number(pk.w) || 75,
+      heightCm: Number(pk.h) || 175,
+      preferredUnit: pk.pu || 'kg',
+      active: pk.a === 1,
+      updatedAt: pk.ut || new Date(0).toISOString(),
+      paymentDate: pk.pd || '',
+      goal: pk.g || '',
+      coachFeedback: pk.fb || '',
+      coachFeedbackDate: pk.fbd || '',
+      measurements: meas,
+      measurementsHistory: [{ date: meas.updatedAt || new Date().toISOString().split('T')[0], weightKg: Number(pk.w) || 75, ...meas }],
+      sessions,
+      videos
+    };
   },
 
   // Merge two database snapshots without losing any users, sessions, or videos
@@ -637,25 +743,23 @@ const CloudSync = {
       if (!existing) {
         userMap.set(u.id, JSON.parse(JSON.stringify(u)));
       } else {
-        // Merge sessions by session id
         const sesMap = new Map();
         [...(existing.sessions || []), ...(u.sessions || [])].forEach(s => {
           if (s && s.id) sesMap.set(s.id, s);
         });
-        // Merge videos by video id
         const vidMap = new Map();
         [...(existing.videos || []), ...(u.videos || [])].forEach(v => {
           if (!v || !v.id) return;
           const prevV = vidMap.get(v.id);
-          if (!prevV || v.status === 'reviewed') vidMap.set(v.id, v);
+          if (!prevV || v.status === 'reviewed' || prevV.hasLocalBlob) {
+            vidMap.set(v.id, { ...v, hasLocalBlob: (prevV && prevV.hasLocalBlob) || v.hasLocalBlob });
+          }
         });
-        // Merge measurementsHistory by date
         const mhMap = new Map();
         [...(existing.measurementsHistory || []), ...(u.measurementsHistory || [])].forEach(m => {
           if (m && m.date) mhMap.set(m.date, m);
         });
 
-        // Take newest top-level user properties (password, active, weight, measurements, etc.)
         const uTime = new Date(u.updatedAt || 0).getTime();
         const exTime = new Date(existing.updatedAt || 0).getTime();
         const newer = uTime >= exTime ? u : existing;
@@ -675,7 +779,6 @@ const CloudSync = {
 
     return {
       lastUpdated: new Date(Math.max(localTime, remoteTime, Date.now())).toISOString(),
-      cloudBlobUrl: remoteDb.cloudBlobUrl || localDb.cloudBlobUrl || '',
       deletedUserIds: Array.from(deletedSet),
       coachProfile: remoteTime >= localTime ? (remoteDb.coachProfile || localDb.coachProfile) : (localDb.coachProfile || remoteDb.coachProfile),
       users: Array.from(userMap.values())
@@ -705,44 +808,26 @@ const CloudSync = {
       }
     }
 
-    // 2. Built-in Automatic Cloud Sync (JSONBlob + ntfy.sh discovery channel)
+    // 2. Built-in Automatic Cloud Sync using < 2.2KB chunked packets on ntfy.sh
     try {
-      let blobUrl = stateData.cloudBlobUrl || localStorage.getItem('ANUARUS_BLOB_URL') || '';
-      if (blobUrl) {
-        const putRes = await fetch(blobUrl, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-          body: JSON.stringify(stateData)
+      const users = stateData.users || [];
+      const packedUsers = users.map(u => this.packUser(u));
+      // Split into small chunks (max 3 users per packet so each packet is < 2.2KB, well under ntfy 4KB limit)
+      const chunkSize = 3;
+      for (let i = 0; i < packedUsers.length; i += chunkSize) {
+        const chunk = packedUsers.slice(i, i + chunkSize);
+        const packet = JSON.stringify({
+          t: 'anuarus_v4',
+          del: stateData.deletedUserIds || [],
+          cp: stateData.coachProfile || {},
+          u: chunk
         });
-        if (putRes.ok) cloudSuccess = true;
-      } else {
-        const postRes = await fetch('https://jsonblob.com/api/jsonBlob', {
+        const res = await fetch(`https://ntfy.sh/${ANUARUS_CLOUD_TOPIC}`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-          body: JSON.stringify(stateData)
+          body: packet
         });
-        if (postRes.ok) {
-          const loc = postRes.headers.get('Location') || postRes.headers.get('location');
-          if (loc) {
-            blobUrl = loc.startsWith('http') ? loc.replace('http:', 'https:') : `https://jsonblob.com${loc}`;
-            stateData.cloudBlobUrl = blobUrl;
-            localStorage.setItem('ANUARUS_BLOB_URL', blobUrl);
-            cloudSuccess = true;
-          }
-        }
+        if (res.ok) cloudSuccess = true;
       }
-
-      // Broadcast latest pointer & lightweight credentials/state to ntfy discovery channel
-      const ntfyPayload = JSON.stringify({
-        type: 'anuarus_sync_v2',
-        cloudBlobUrl: blobUrl,
-        state: stateData
-      });
-      const ntfyRes = await fetch(`https://ntfy.sh/${ANUARUS_CLOUD_TOPIC}`, {
-        method: 'POST',
-        body: ntfyPayload
-      });
-      if (ntfyRes.ok) cloudSuccess = true;
     } catch (e) {
       console.warn('Built-in cloud sync warning:', e);
     }
@@ -772,49 +857,42 @@ const CloudSync = {
       }
     }
 
-    // 2. Try built-in automatic discovery channel (ntfy.sh + jsonblob)
+    // 2. Pull all compact packets from ntfy.sh channel (with cache-busting timestamp)
     try {
-      const res = await fetch(`https://ntfy.sh/${ANUARUS_CLOUD_TOPIC}/json?poll=1&since=all`, {
+      const res = await fetch(`https://ntfy.sh/${ANUARUS_CLOUD_TOPIC}/json?poll=1&since=all&_t=${Date.now()}`, {
         cache: 'no-store'
       });
       if (res.ok) {
         const text = await res.text();
         const lines = text.trim().split('\n').filter(Boolean);
-        let latestState = null;
-        let latestBlobUrl = localStorage.getItem('ANUARUS_BLOB_URL') || '';
+        let reconstructed = {
+          lastUpdated: new Date(0).toISOString(),
+          deletedUserIds: [],
+          coachProfile: null,
+          users: []
+        };
+        let foundAny = false;
 
-        for (let i = lines.length - 1; i >= 0; i--) {
+        for (let i = 0; i < lines.length; i++) {
           try {
             const msg = JSON.parse(lines[i]);
             if (msg.event === 'message' && msg.message) {
               const parsed = JSON.parse(msg.message);
-              if (parsed && parsed.type === 'anuarus_sync_v2') {
-                if (parsed.cloudBlobUrl && !latestBlobUrl) {
-                  latestBlobUrl = parsed.cloudBlobUrl;
-                }
-                if (parsed.state && Array.isArray(parsed.state.users)) {
-                  latestState = parsed.state;
-                  break;
-                }
+              if (parsed && parsed.t === 'anuarus_v4' && Array.isArray(parsed.u)) {
+                foundAny = true;
+                const unpacked = parsed.u.map(pk => this.unpackUser(pk)).filter(Boolean);
+                reconstructed = this.mergeDatabases(reconstructed, {
+                  lastUpdated: new Date((msg.time || 0) * 1000).toISOString(),
+                  deletedUserIds: parsed.del || [],
+                  coachProfile: parsed.cp || reconstructed.coachProfile,
+                  users: unpacked
+                });
               }
             }
           } catch {}
         }
 
-        if (latestBlobUrl) {
-          localStorage.setItem('ANUARUS_BLOB_URL', latestBlobUrl);
-          try {
-            const blobRes = await fetch(latestBlobUrl, { cache: 'no-store' });
-            if (blobRes.ok) {
-              const blobJson = await blobRes.json();
-              if (blobJson && Array.isArray(blobJson.users)) {
-                return latestState ? this.mergeDatabases(latestState, blobJson) : blobJson;
-              }
-            }
-          } catch {}
-        }
-
-        if (latestState) return latestState;
+        if (foundAny) return reconstructed;
       }
     } catch (e) {
       console.warn('Built-in cloud pull warning:', e);
@@ -928,15 +1006,16 @@ const AppState = {
     } else if (window.location.hash.startsWith('#anuarus_user=')) {
       try {
         const b64 = decodeURIComponent(window.location.hash.replace('#anuarus_user=', ''));
-        const userObj = JSON.parse(decodeURIComponent(escape(atob(b64))));
-        if (userObj && userObj.id && userObj.username) {
+        const parsed = JSON.parse(decodeURIComponent(escape(atob(b64))));
+        const userObj = (parsed && parsed.i && parsed.n) ? CloudSync.unpackUser(parsed) : parsed;
+        if (userObj && userObj.id) {
           this.db = CloudSync.mergeDatabases(this.db, { users: [userObj] });
           this.persist(true);
           window.history.replaceState(null, '', window.location.pathname);
           setTimeout(() => {
-            const uInp = document.getElementById('login-username');
-            if (uInp) uInp.value = userObj.accessCode || userObj.username;
-            showToast(`Cuenta de ${userObj.name} sincronizada. Ingresa tu contraseña.`);
+            const pInp = document.getElementById('login-password');
+            if (pInp) pInp.value = userObj.password || userObj.accessCode || '';
+            showToast(`Cuenta de ${userObj.name} sincronizada. Pulsa Ingresar.`);
           }, 250);
         }
       } catch (e) {
@@ -1310,7 +1389,7 @@ function refreshLogos() {
 }
 
 // ============================================================================
-// 10. VISTA DE INICIO DE SESIÓN (ADMIN: diego rodea / 123456 & CLIENTES)
+// 10. VISTA DE INICIO DE SESIÓN (ACCESO ÚNICAMENTE CON CONTRASEÑA)
 // ============================================================================
 function renderAuthView() {
   const activeClients = (AppState.db.users || []).filter(u => u.active);
@@ -1328,35 +1407,33 @@ function renderAuthView() {
         <form id="login-form">
           <div class="form-group">
             <label class="form-label">
-              <span>USUARIO O CÓDIGO DE ACCESO</span>
-              <span class="mono" style="font-size:0.7rem;color:var(--text-muted);">EJ. CARLOS O ANU-101</span>
+              <span>CONTRASEÑA DE ACCESO</span>
+              <button type="button" id="toggle-pass-vis" class="pill-btn" style="padding:0.15rem 0.5rem;font-size:0.68rem;">
+                👁 Mostrar
+              </button>
             </label>
-            <input type="text" id="login-username" class="form-input" placeholder="Tu usuario, código (ANU-101) o diego rodea" required autocomplete="username" />
-          </div>
-
-          <div class="form-group">
-            <label class="form-label">
-              <span>CONTRASEÑA</span>
-            </label>
-            <input type="password" id="login-password" class="form-input mono" placeholder="••••••" required autocomplete="current-password" />
+            <input type="password" id="login-password" class="form-input mono" style="font-size:1.08rem;text-align:center;letter-spacing:0.08em;" placeholder="Ingresa tu contraseña personal" required autocomplete="current-password" />
+            <div style="font-size:0.74rem;color:var(--text-secondary);text-align:center;margin-top:0.45rem;">
+              Ingresa únicamente la contraseña que te asignó Diego Rodea.
+            </div>
           </div>
 
           <div id="login-error" style="display:none;margin-bottom:1rem;padding:0.7rem;border:1px solid var(--border-strong);background:var(--bg-secondary);font-size:0.82rem;font-weight:600;"></div>
 
-          <button type="submit" id="login-submit-btn" class="btn btn-block" style="padding:0.8rem;">
-            INGRESAR A PLATAFORMA ANUARUS
+          <button type="submit" id="login-submit-btn" class="btn btn-block" style="padding:0.85rem;">
+            INGRESAR A ANUARUS
           </button>
         </form>
 
         <div class="quick-access-pills">
-          <div class="eyebrow">ACCESO RÁPIDO DEMOSTRACIÓN:</div>
+          <div class="eyebrow">ACCESO RÁPIDO DEMOSTRACIÓN (1 CLIC):</div>
           <div class="pill-list">
-            <button type="button" class="pill-btn" data-quick-user="diego rodea" data-quick-pass="123456">
-              ★ Admin: diego rodea
+            <button type="button" class="pill-btn" data-quick-pass="123456">
+              ★ Admin Diego (123456)
             </button>
             ${activeClients.map(u => `
-              <button type="button" class="pill-btn" data-quick-user="${escapeHtml(u.accessCode || u.username)}" data-quick-pass="${escapeHtml(u.password)}">
-                ${escapeHtml(u.name.split(' ')[0])} (${escapeHtml(u.accessCode || u.username)})
+              <button type="button" class="pill-btn" data-quick-pass="${escapeHtml(u.password)}">
+                ${escapeHtml(u.name.split(' ')[0])} (${escapeHtml(u.password)})
               </button>
             `).join('')}
           </div>
@@ -1366,7 +1443,7 @@ function renderAuthView() {
           <button type="button" id="auth-theme-toggle" class="pill-btn">
             Tema (${AppState.theme === 'dark' ? 'Claro' : 'Oscuro'})
           </button>
-          <button type="button" id="auth-sync-cloud-btn" class="pill-btn" title="Actualizar usuarios desde la nube">
+          <button type="button" id="auth-sync-cloud-btn" class="pill-btn" title="Actualizar contraseñas desde la nube">
             ↻ Sincronizar Nube
           </button>
         </div>
@@ -1375,13 +1452,14 @@ function renderAuthView() {
   `;
 }
 
-function findMatchingClient(normInput, rawPass) {
+function findMatchingClient(rawInput) {
+  const norm = String(rawInput || '').trim().toLowerCase();
+  if (!norm) return null;
   return (AppState.db.users || []).find(u => {
-    const uName = (u.username || '').toLowerCase().trim();
-    const uCode = (u.accessCode || '').toLowerCase().trim();
-    const uCodeDigits = uCode.replace(/^anu-/, '');
-    const matchesIdentifier = (uName === normInput || uCode === normInput || (uCodeDigits && uCodeDigits === normInput));
-    return matchesIdentifier && String(u.password).trim() === rawPass;
+    const uPass = String(u.password || '').trim().toLowerCase();
+    const uCode = String(u.accessCode || '').trim().toLowerCase();
+    const uName = String(u.username || '').trim().toLowerCase();
+    return uPass === norm || uCode === norm || uName === norm;
   });
 }
 
@@ -1389,37 +1467,47 @@ function bindAuthEvents() {
   const form = document.getElementById('login-form');
   const errBox = document.getElementById('login-error');
   const submitBtn = document.getElementById('login-submit-btn');
+  const passInp = document.getElementById('login-password');
+  const toggleVisBtn = document.getElementById('toggle-pass-vis');
+
+  if (toggleVisBtn && passInp) {
+    toggleVisBtn.addEventListener('click', () => {
+      const isPass = passInp.type === 'password';
+      passInp.type = isPass ? 'text' : 'password';
+      toggleVisBtn.textContent = isPass ? '🙈 Ocultar' : '👁 Mostrar';
+    });
+  }
 
   if (form) {
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
-      const rawUser = (document.getElementById('login-username').value || '').trim();
-      const rawPass = (document.getElementById('login-password').value || '').trim();
-      const normUser = rawUser.toLowerCase().replace(/\s+/g, ' ');
+      const rawPass = (passInp ? passInp.value : '').trim();
+      const normPass = rawPass.toLowerCase();
 
-      // Check Admin Account: diego rodea / 123456
-      if ((normUser === 'diego rodea' || normUser === 'diegorodea' || normUser === 'admin') && rawPass === '123456') {
+      // Check Admin Account: contraseña 123456 (o diego rodea)
+      if (normPass === '123456' || normPass === 'diego rodea' || normPass === 'diegorodea') {
         AppState.currentUser = { role: 'admin', name: 'Diego Rodea' };
         AppState.impersonatingUserId = null;
         AppState.activeTab = 'admin_users';
-        AppState.syncFromCloud(true);
+        // Push local users & pull remote users so Admin and Cloud are 100% in sync
+        AppState.persist(true);
         AppState.render();
         showToast('Bienvenido, Entrenador y Nutriólogo Diego Rodea.');
         return;
       }
 
-      // Check Client Accounts locally first, and if not found or outdated, pull from Cloud!
-      let found = findMatchingClient(normUser, rawPass);
+      // Check Client Accounts by Password locally first, then pull from Cloud if not found!
+      let found = findMatchingClient(rawPass);
       if (!found) {
-        if (submitBtn) submitBtn.textContent = 'SINCRONIZANDO CON LA NUBE...';
+        if (submitBtn) submitBtn.textContent = 'BUSCANDO TU CONTRASEÑA EN LA NUBE...';
         await AppState.syncFromCloud(false);
-        if (submitBtn) submitBtn.textContent = 'INGRESAR A PLATAFORMA ANUARUS';
-        found = findMatchingClient(normUser, rawPass);
+        if (submitBtn) submitBtn.textContent = 'INGRESAR A ANUARUS';
+        found = findMatchingClient(rawPass);
       }
 
       if (!found) {
         errBox.style.display = 'block';
-        errBox.textContent = 'Usuario/código o contraseña incorrectos. Verifica tus datos con Diego Rodea.';
+        errBox.textContent = 'Contraseña no encontrada. Verifica que esté bien escrita o pide a Diego Rodea tu enlace de acceso.';
         return;
       }
 
@@ -1437,10 +1525,9 @@ function bindAuthEvents() {
     });
   }
 
-  document.querySelectorAll('[data-quick-user]').forEach(btn => {
+  document.querySelectorAll('[data-quick-pass]').forEach(btn => {
     btn.addEventListener('click', () => {
-      document.getElementById('login-username').value = btn.getAttribute('data-quick-user');
-      document.getElementById('login-password').value = btn.getAttribute('data-quick-pass');
+      if (passInp) passInp.value = btn.getAttribute('data-quick-pass');
       form.dispatchEvent(new Event('submit'));
     });
   });
@@ -1460,7 +1547,7 @@ function bindAuthEvents() {
     syncCloudBtn.addEventListener('click', async () => {
       syncCloudBtn.textContent = '↻ Sincronizando...';
       await AppState.syncFromCloud(true);
-      showToast('Cuentas sincronizadas desde la nube.');
+      showToast('Contraseñas actualizadas desde la nube.');
     });
   }
 }
@@ -1600,9 +1687,8 @@ function renderAdminUsersTab(users, activeCount, inactiveCount, totalVideos) {
                   <td>
                     <div style="font-weight:700;font-size:0.95rem;">${escapeHtml(u.name)}</div>
                     <div style="display:flex;gap:0.35rem;flex-wrap:wrap;margin:0.3rem 0;">
-                      <span class="badge badge-outline">USR: ${escapeHtml(u.username)}</span>
-                      <span class="badge badge-solid">CÓDIGO: ${escapeHtml(u.accessCode || 'ANU-100')}</span>
-                      <span class="badge">CLAVE: ${escapeHtml(u.password)}</span>
+                      <span class="badge badge-solid">🔑 CONTRASEÑA: ${escapeHtml(u.password)}</span>
+                      <span class="badge badge-outline">CÓDIGO: ${escapeHtml(u.accessCode || 'ANU-100')}</span>
                     </div>
                     <div class="mono" style="font-size:0.73rem;color:var(--text-secondary);">
                       ${u.sex === 'F' ? 'Mujer' : 'Hombre'} · ${u.weightKg} kg · ${u.heightCm} cm
@@ -1634,11 +1720,11 @@ function renderAdminUsersTab(users, activeCount, inactiveCount, totalVideos) {
                       <button type="button" class="btn btn-sm" data-inspect-user="${u.id}">
                         Ver Expediente
                       </button>
-                      <button type="button" class="btn btn-secondary btn-sm" data-edit-credentials="${u.id}" title="Cambiar usuario, código o contraseña">
-                        🔑 Usuario/Clave
+                      <button type="button" class="btn btn-secondary btn-sm" data-edit-credentials="${u.id}" title="Cambiar contraseña del cliente">
+                        🔑 Contraseña
                       </button>
-                      <button type="button" class="btn btn-secondary btn-sm" data-wa-credentials="${u.id}" title="Enviar usuario, código y contraseña por WhatsApp">
-                        📲 Mandar Acceso
+                      <button type="button" class="btn btn-secondary btn-sm" data-wa-credentials="${u.id}" title="Enviar contraseña y enlace por WhatsApp">
+                        📲 Mandar Contraseña
                       </button>
                       <button type="button" class="btn btn-secondary btn-sm" data-toggle-active="${u.id}">
                         ${u.active ? 'Dar de Baja' : 'Dar de Alta'}
@@ -2066,21 +2152,23 @@ function generateUniqueAccessCode() {
 }
 
 function sendUserCredentialsWhatsApp(user) {
-  const userTokenB64 = btoa(unescape(encodeURIComponent(JSON.stringify(user))));
-  const appUrl = `${window.location.origin}${window.location.pathname}#anuarus_user=${encodeURIComponent(userTokenB64)}`;
+  const packed = CloudSync.packUser(user);
+  const userTokenB64 = btoa(unescape(encodeURIComponent(JSON.stringify(packed))));
+  const baseUrl = window.location.origin.includes('github.io')
+    ? `${window.location.origin}${window.location.pathname}`
+    : 'https://diegorodea89.github.io/Anuarus/';
+  const appUrl = `${baseUrl}#anuarus_user=${encodeURIComponent(userTokenB64)}`;
   const msg = [
     `*BIENVENIDO A ANUARUS // DIEGO RODEA*`,
     `Hola *${user.name}*, tu cuenta clínica y de entrenamiento ya está activa en la nube.`,
     ``,
-    `*TUS DATOS DE ACCESO:*`,
-    `• *Usuario:* ${user.username}`,
-    `• *Código de Acceso:* ${user.accessCode || 'ANU-101'}`,
-    `• *Contraseña:* ${user.password}`,
+    `*TU CONTRASEÑA ÚNICA DE ACCESO:*`,
+    `🔑 *${user.password}*`,
     ``,
     `*Entra desde tu celular en este enlace:*`,
     appUrl,
     ``,
-    `(Puedes iniciar sesión escribiendo tu Usuario *${user.username}* o tu Código *${user.accessCode}* y tu contraseña).`
+    `(Para entrar solo necesitas escribir tu contraseña *${user.password}*).`
   ].join('\n');
 
   window.open(`https://wa.me/?text=${encodeURIComponent(msg)}`, '_blank');
@@ -2108,7 +2196,7 @@ function openCreateUserModal() {
         <form id="form-create-user">
           <div class="grid-2">
             <div class="form-group">
-              <label class="form-label">NOMBRE COMPLETO</label>
+              <label class="form-label">NOMBRE COMPLETO DEL CLIENTE</label>
               <input type="text" id="nu-name" class="form-input" placeholder="Ej. Alejandro Torres" required />
             </div>
             <div class="form-group">
@@ -2120,18 +2208,21 @@ function openCreateUserModal() {
             </div>
           </div>
 
-          <div class="grid-3">
-            <div class="form-group">
-              <label class="form-label">USUARIO ASIGNADO</label>
-              <input type="text" id="nu-username" class="form-input mono" placeholder="Ej. alejandro" required />
+          <div class="grid-2" style="padding:0.85rem;background:var(--bg-secondary);border:1.5px solid var(--border-strong);border-radius:var(--radius-sm);margin-bottom:1rem;">
+            <div class="form-group" style="margin-bottom:0;">
+              <label class="form-label">🔑 CONTRASEÑA DE ACCESO DEL CLIENTE (ÚNICA)</label>
+              <input type="text" id="nu-password" class="form-input mono" placeholder="Ej. alejandro123" style="font-weight:700;font-size:1rem;" required />
+              <div style="font-size:0.74rem;color:var(--text-secondary);margin-top:0.25rem;">
+                El cliente entrará a la app escribiendo <strong>únicamente esta contraseña</strong> en su celular.
+              </div>
             </div>
-            <div class="form-group">
-              <label class="form-label">CÓDIGO DE ACCESO</label>
+            <div class="form-group" style="margin-bottom:0;">
+              <label class="form-label">CÓDIGO / FOLIO INTERNO</label>
               <input type="text" id="nu-code" class="form-input mono" value="${suggestedCode}" required />
-            </div>
-            <div class="form-group">
-              <label class="form-label">CONTRASEÑA</label>
-              <input type="text" id="nu-password" class="form-input mono" value="123456" required />
+              <input type="hidden" id="nu-username" value="" />
+              <div style="font-size:0.74rem;color:var(--text-secondary);margin-top:0.25rem;">
+                También funciona como clave de respaldo.
+              </div>
             </div>
           </div>
 
@@ -2162,7 +2253,7 @@ function openCreateUserModal() {
 
           <div style="display:flex;justify-content:flex-end;gap:0.65rem;margin-top:1.25rem;flex-wrap:wrap;">
             <button type="button" class="btn btn-secondary" id="cancel-create-modal">Cancelar</button>
-            <button type="submit" class="btn" id="btn-create-only">Dar de Alta y Guardar en la Nube</button>
+            <button type="submit" class="btn" id="btn-create-only">Dar de Alta y Guardar Contraseña en la Nube</button>
           </div>
         </form>
       </div>
@@ -2173,23 +2264,25 @@ function openCreateUserModal() {
   document.getElementById('close-create-modal').addEventListener('click', close);
   document.getElementById('cancel-create-modal').addEventListener('click', close);
 
-  // Auto-suggest username when typing name
+  // Auto-suggest unique password & username when typing name
   const nameInp = document.getElementById('nu-name');
   const userInp = document.getElementById('nu-username');
-  if (nameInp && userInp) {
+  const passInp = document.getElementById('nu-password');
+  if (nameInp && passInp) {
     nameInp.addEventListener('input', () => {
-      if (!userInp.dataset.touched) {
-        const clean = nameInp.value
-          .toLowerCase()
-          .normalize('NFD')
-          .replace(/[\u0300-\u036f]/g, '')
-          .replace(/[^a-z0-9]/g, '')
-          .slice(0, 14);
-        userInp.value = clean;
+      const clean = nameInp.value
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/[^a-z0-9]/g, '')
+        .slice(0, 12);
+      if (userInp) userInp.value = clean || ('user' + Date.now().toString().slice(-4));
+      if (!passInp.dataset.touched) {
+        passInp.value = clean ? `${clean}123` : '';
       }
     });
-    userInp.addEventListener('input', () => {
-      userInp.dataset.touched = '1';
+    passInp.addEventListener('input', () => {
+      passInp.dataset.touched = '1';
     });
   }
 
@@ -2197,9 +2290,10 @@ function openCreateUserModal() {
     e.preventDefault();
     const name = document.getElementById('nu-name').value.trim();
     const sex = document.getElementById('nu-sex').value;
-    const username = document.getElementById('nu-username').value.trim().toLowerCase();
     const accessCode = document.getElementById('nu-code').value.trim().toUpperCase() || generateUniqueAccessCode();
     const password = document.getElementById('nu-password').value.trim();
+    const cleanBase = name.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]/g, '').slice(0, 12);
+    const username = (document.getElementById('nu-username').value.trim().toLowerCase()) || cleanBase || accessCode.toLowerCase();
     const weightKg = parseFloat(document.getElementById('nu-weight').value) || 75;
     const heightCm = parseFloat(document.getElementById('nu-height').value) || 175;
     const paymentDate = document.getElementById('nu-paydate').value;
@@ -2207,8 +2301,13 @@ function openCreateUserModal() {
     const coachFeedback = document.getElementById('nu-feedback').value.trim() ||
       'Bienvenido a Anuarus. Ingresa tus 6 perímetros corporales en la pestaña de Antropometría y registra tus levantamientos cada semana.';
 
-    if ((AppState.db.users || []).some(u => u.username.toLowerCase() === username || (u.accessCode || '').toUpperCase() === accessCode)) {
-      alert('Ese nombre de usuario o código de acceso ya existe. Elige uno distinto.');
+    if (password.toLowerCase() === ADMIN_CREDENTIALS.password.toLowerCase()) {
+      alert('La contraseña "123456" es exclusiva del Administrador (Diego Rodea). Por favor elige una contraseña única para este cliente.');
+      return;
+    }
+
+    if ((AppState.db.users || []).some(u => (u.password || '').trim().toLowerCase() === password.toLowerCase())) {
+      alert('Otro cliente ya tiene esa misma contraseña. Asigna una contraseña única para identificar su cuenta automáticamente.');
       return;
     }
 
@@ -2244,7 +2343,7 @@ function openCreateUserModal() {
     AppState.persist(true);
     close();
     AppState.render();
-    showToast(`Cuenta creada en la nube: Usuario "${username}" | Código "${accessCode}".`);
+    showToast(`Cliente creado en la nube. Contraseña de acceso: "${password}".`);
   });
 }
 
@@ -2254,11 +2353,11 @@ function openEditCredentialsModal(user) {
 
   slot.innerHTML = `
     <div class="modal-backdrop">
-      <div class="modal-box" style="max-width:520px;">
+      <div class="modal-box" style="max-width:500px;">
         <div class="card-header">
           <div>
             <span class="eyebrow">GESTIÓN DE ACCESO EN LA NUBE // ANUARUS</span>
-            <h3 class="card-title">Editar Usuario, Código y Contraseña</h3>
+            <h3 class="card-title">Cambiar Contraseña del Cliente</h3>
           </div>
           <button type="button" class="btn btn-secondary btn-sm" id="close-cred-modal">✕</button>
         </div>
@@ -2269,28 +2368,25 @@ function openEditCredentialsModal(user) {
             <input type="text" id="ec-name" class="form-input" value="${escapeHtml(user.name)}" required />
           </div>
 
-          <div class="grid-3">
+          <div class="grid-2">
             <div class="form-group">
-              <label class="form-label">USUARIO</label>
-              <input type="text" id="ec-username" class="form-input mono" value="${escapeHtml(user.username)}" required />
+              <label class="form-label">🔑 CONTRASEÑA DE ACCESO</label>
+              <input type="text" id="ec-password" class="form-input mono" style="font-weight:700;font-size:1rem;" value="${escapeHtml(user.password)}" required />
             </div>
             <div class="form-group">
-              <label class="form-label">CÓDIGO DE ACCESO</label>
+              <label class="form-label">CÓDIGO / FOLIO</label>
               <input type="text" id="ec-code" class="form-input mono" value="${escapeHtml(user.accessCode || 'ANU-101')}" required />
-            </div>
-            <div class="form-group">
-              <label class="form-label">CONTRASEÑA</label>
-              <input type="text" id="ec-password" class="form-input mono" value="${escapeHtml(user.password)}" required />
+              <input type="hidden" id="ec-username" value="${escapeHtml(user.username)}" />
             </div>
           </div>
 
           <div style="padding:0.75rem;background:var(--bg-secondary);border:1px solid var(--border-color);border-radius:var(--radius-sm);font-size:0.8rem;margin-bottom:1rem;">
-            El usuario podrá iniciar sesión escribiendo su <strong>Usuario (${escapeHtml(user.username)})</strong> o su <strong>Código (${escapeHtml(user.accessCode || 'ANU-101')})</strong> junto con su contraseña.
+            El cliente entra a su cuenta desde cualquier celular o computadora ingresando únicamente su contraseña: <strong>${escapeHtml(user.password)}</strong>.
           </div>
 
           <div style="display:flex;justify-content:space-between;gap:0.65rem;flex-wrap:wrap;">
             <button type="button" class="btn btn-outline btn-sm" id="wa-cred-from-modal">
-              📲 Enviar por WhatsApp al Cliente
+              📲 Enviar Contraseña por WhatsApp
             </button>
             <div style="display:flex;gap:0.5rem;">
               <button type="button" class="btn btn-secondary" id="cancel-cred-modal">Cancelar</button>
@@ -2308,7 +2404,6 @@ function openEditCredentialsModal(user) {
 
   document.getElementById('wa-cred-from-modal').addEventListener('click', () => {
     user.name = document.getElementById('ec-name').value.trim() || user.name;
-    user.username = document.getElementById('ec-username').value.trim().toLowerCase() || user.username;
     user.accessCode = document.getElementById('ec-code').value.trim().toUpperCase() || user.accessCode;
     user.password = document.getElementById('ec-password').value.trim() || user.password;
     user.updatedAt = new Date().toISOString();
@@ -2319,27 +2414,30 @@ function openEditCredentialsModal(user) {
   document.getElementById('form-edit-credentials').addEventListener('submit', (e) => {
     e.preventDefault();
     const newName = document.getElementById('ec-name').value.trim();
-    const newUsername = document.getElementById('ec-username').value.trim().toLowerCase();
     const newCode = document.getElementById('ec-code').value.trim().toUpperCase();
     const newPass = document.getElementById('ec-password').value.trim();
 
+    if (newPass.toLowerCase() === ADMIN_CREDENTIALS.password.toLowerCase()) {
+      alert('La contraseña "123456" es exclusiva del Administrador (Diego Rodea). Elige una distinta para el cliente.');
+      return;
+    }
+
     const conflict = (AppState.db.users || []).some(
-      u => u.id !== user.id && (u.username.toLowerCase() === newUsername || (u.accessCode || '').toUpperCase() === newCode)
+      u => u.id !== user.id && (u.password || '').trim().toLowerCase() === newPass.toLowerCase()
     );
     if (conflict) {
-      alert('Otro cliente ya tiene ese usuario o código. Elige uno distinto.');
+      alert('Otro cliente ya tiene esa contraseña. Elige una contraseña única para este cliente.');
       return;
     }
 
     user.name = newName;
-    user.username = newUsername;
     user.accessCode = newCode;
     user.password = newPass;
     user.updatedAt = new Date().toISOString();
     AppState.persist(true);
     close();
     AppState.render();
-    showToast(`Acceso actualizado en la nube para ${user.name}.`);
+    showToast(`Contraseña actualizada en la nube para ${user.name}.`);
   });
 }
 
